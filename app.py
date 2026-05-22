@@ -1,0 +1,500 @@
+import os
+import json
+import re
+import html
+import time
+from datetime import datetime
+
+import pandas as pd
+import streamlit as st
+import google.generativeai as genai
+
+
+# =========================
+# 基本設定
+# =========================
+
+st.set_page_config(
+    page_title="AI Translation Review Assistant",
+    page_icon="🌐",
+    layout="wide"
+)
+
+LOG_DIR = "logs"
+LOG_FILE = os.path.join(LOG_DIR, "translation_logs.csv")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+
+# =========================
+# Gemini API 設定
+# =========================
+
+def setup_gemini():
+    api_key = st.secrets.get("GEMINI_API_KEY", None)
+
+    if not api_key:
+        st.error("找不到 GEMINI_API_KEY。請確認 .streamlit/secrets.toml 是否設定正確。")
+        return None
+
+    genai.configure(api_key=api_key)
+    return genai.GenerativeModel("models/gemini-2.5-flash")
+
+
+model = setup_gemini()
+
+
+# =========================
+# 預設案例
+# =========================
+
+CASES = {
+    "Could you possibly send it by Friday?": {
+        "source": "Could you possibly send it by Friday?",
+        "original_tone": "委婉請求",
+        "risk": "可能被翻成較強硬或命令式語氣",
+        "warning": "原文是委婉請求，翻譯時可能變成較強硬的命令語氣。採納前請確認是否需要保留禮貌語氣。",
+        "fixed_translation": "你必須在星期五前寄給我。"
+    },
+    "I’m not sure this plan is realistic.": {
+        "source": "I’m not sure this plan is realistic.",
+        "original_tone": "不確定、保留語氣",
+        "risk": "可能被翻成較肯定或直接的批評",
+        "warning": "原文包含不確定語氣，翻譯時可能被轉成較肯定的否定判斷。採納前請確認是否保留原文的保留語氣。",
+        "fixed_translation": "我認為這個計畫不太實際。"
+    },
+    "This may not be the best option.": {
+        "source": "This may not be the best option.",
+        "original_tone": "保留意見",
+        "risk": "可能被翻成明確否定",
+        "warning": "原文使用 may not，語氣較保留；翻譯時可能變成較明確的否定。採納前請確認是否保留原文的不確定性。",
+        "fixed_translation": "這不是最好的選擇。"
+    },
+    "I would appreciate it if you could review this.": {
+        "source": "I would appreciate it if you could review this.",
+        "original_tone": "禮貌請求",
+        "risk": "可能被翻成較直接、較不禮貌的請求",
+        "warning": "原文帶有禮貌請求語氣，翻譯時可能削弱禮貌程度。採納前請確認是否保留客氣表達。",
+        "fixed_translation": "請你檢查這個。"
+    },
+}
+
+# =========================
+# Gemini 翻譯函式
+# =========================
+
+def translate_with_gemini(source_text: str) -> str:
+    if model is None:
+        return ""
+
+    prompt = f"""
+你是一個 AI 翻譯工具。
+
+請將以下英文句子翻譯成自然的繁體中文。
+
+限制：
+- 只輸出一個最適合的繁體中文翻譯
+- 不要解釋
+- 不要列點
+- 不要提供多個版本
+- 不要加拼音
+- 不要加任何前言或結語
+
+英文句子：
+{source_text}
+"""
+
+    try:
+        response = model.generate_content(prompt)
+        text = response.text.strip()
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if lines:
+            return lines[0]
+
+        return text
+
+    except Exception as e:
+        st.error(f"Gemini 翻譯失敗：{e}")
+        return ""
+
+
+# =========================
+# Gemini 語氣分析函式
+# 自訂輸入時使用
+# =========================
+
+def clean_json_text(text: str) -> str:
+    text = text.strip()
+    text = re.sub(r"^```json", "", text)
+    text = re.sub(r"^```", "", text)
+    text = re.sub(r"```$", "", text)
+    return text.strip()
+
+
+def analyze_tone_with_gemini(source_text: str, translation: str) -> dict:
+    default_result = {
+        "source_tone": "需人工判斷",
+        "translation_tone": "需人工判斷",
+        "risk": "此翻譯可能存在語氣或原意偏移，建議使用者自行確認。",
+        "warning": "採納前請確認 AI 翻譯是否保留原文的語氣、禮貌程度與不確定性。"
+    }
+
+    if model is None:
+        return default_result
+
+    prompt = f"""
+請你分析以下英文原文與繁體中文翻譯之間是否可能有語氣偏移。
+
+請只輸出 JSON，不要解釋，不要加 markdown。
+
+JSON 格式如下：
+{{
+  "source_tone": "原文語氣，用 10 字以內描述",
+  "translation_tone": "譯文語氣，用 10 字以內描述",
+  "risk": "可能的語氣偏移風險，用一句話描述",
+  "warning": "給使用者的採納前提醒，用一句話描述"
+}}
+
+英文原文：
+{source_text}
+
+中文翻譯：
+{translation}
+"""
+
+    try:
+        response = model.generate_content(prompt)
+        text = clean_json_text(response.text)
+        data = json.loads(text)
+
+        return {
+            "source_tone": data.get("source_tone", default_result["source_tone"]),
+            "translation_tone": data.get("translation_tone", default_result["translation_tone"]),
+            "risk": data.get("risk", default_result["risk"]),
+            "warning": data.get("warning", default_result["warning"]),
+        }
+
+    except Exception:
+        return default_result
+
+
+# =========================
+# CSV 記錄函式
+# =========================
+
+def save_log(row: dict):
+    df = pd.DataFrame([row])
+
+    if os.path.exists(LOG_FILE):
+        old_df = pd.read_csv(LOG_FILE)
+        new_df = pd.concat([old_df, df], ignore_index=True)
+    else:
+        new_df = df
+
+    new_df.to_csv(LOG_FILE, index=False, encoding="utf-8-sig")
+
+
+# =========================
+# Session State 初始化
+# =========================
+
+if "translation" not in st.session_state:
+    st.session_state.translation = ""
+
+if "tone_info" not in st.session_state:
+    st.session_state.tone_info = None
+
+if "current_source_key" not in st.session_state:
+    st.session_state.current_source_key = ""
+
+if "start_time" not in st.session_state:
+    st.session_state.start_time = None
+
+
+# =========================
+# 頁面標題
+# =========================
+
+st.title("AI Translation Review Assistant")
+
+
+# =========================
+# Sidebar 設定
+# =========================
+
+st.sidebar.header("介面設定")
+
+participant_id = st.sidebar.text_input(
+    "Participant ID",
+    value="P001"
+)
+
+condition = st.sidebar.radio(
+    "選擇介面版本",
+    [
+        "A｜Only Translation",
+        "B｜Tone Label",
+        "C｜Warning + Checkpoint"
+    ]
+)
+
+input_mode = st.sidebar.radio(
+    "選擇輸入方式",
+    [
+        "使用預設案例",
+        "自行輸入英文句子"
+    ]
+)
+
+
+# =========================
+# 決定輸入來源
+# =========================
+
+selected_case_name = ""
+case = None
+source_text = ""
+
+if input_mode == "使用預設案例":
+    selected_case_name = st.sidebar.selectbox(
+        "選擇翻譯案例",
+        list(CASES.keys())
+    )
+
+    case = CASES[selected_case_name]
+    source_text = case["source"]
+    source_key = f"preset::{selected_case_name}"
+
+else:
+    source_text = st.text_area(
+        "請輸入想翻譯的英文句子：",
+        value="",
+        height=120,
+        placeholder="例如：Could you possibly send it by Friday?"
+    )
+
+    selected_case_name = "自訂輸入"
+    source_key = f"custom::{source_text}"
+
+
+# 如果換了輸入內容，就清空前一次翻譯
+if st.session_state.current_source_key != source_key:
+    st.session_state.translation = ""
+    st.session_state.tone_info = None
+    st.session_state.current_source_key = source_key
+    st.session_state.start_time = None
+
+
+# =========================
+# 主畫面：左右雙欄
+# =========================
+
+left_col, right_col = st.columns([1, 1])
+
+
+with left_col:
+    st.subheader("Original Text")
+
+    if source_text.strip():
+        safe_source_text = html.escape(source_text)
+
+        st.markdown(
+            f"""
+            <div style="
+                border:1px solid #ddd;
+                padding:18px;
+                border-radius:12px;
+                background-color:#fafafa;
+                font-size:18px;">
+                <b>English Source:</b><br><br>
+                {safe_source_text}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.info("請先輸入英文句子，或選擇預設案例。")
+
+    if input_mode == "使用預設案例" and case is not None:
+        st.markdown("### 原文語氣資訊")
+        st.write(f"原文語氣：**{case['original_tone']}**")
+        st.write(f"可能風險：{case['risk']}")
+
+
+with right_col:
+    st.subheader("AI Translation")
+
+    if st.button("Translate with Gemini"):
+        if not source_text.strip():
+            st.warning("請先輸入英文句子。")
+        else:
+            st.session_state.start_time = time.time()
+
+            with st.spinner("Gemini 翻譯中..."):
+                ai_translation = translate_with_gemini(source_text)
+
+            if input_mode == "使用預設案例" and not ai_translation:
+                ai_translation = case["fixed_translation"]
+
+            st.session_state.translation = ai_translation
+
+            if input_mode == "自行輸入英文句子" and ai_translation:
+                with st.spinner("分析語氣偏移中..."):
+                    st.session_state.tone_info = analyze_tone_with_gemini(
+                        source_text,
+                        ai_translation
+                    )
+
+            elif input_mode == "使用預設案例" and case is not None:
+                st.session_state.tone_info = {
+                    "source_tone": case["original_tone"],
+                    "translation_tone": "依 AI 翻譯結果判斷",
+                    "risk": case["risk"],
+                    "warning": case["warning"],
+                }
+
+    if st.session_state.translation:
+        safe_translation = html.escape(st.session_state.translation)
+
+        st.markdown(
+            f"""
+            <div style="
+                border:1px solid #ddd;
+                padding:18px;
+                border-radius:12px;
+                background-color:#ffffff;
+                font-size:18px;">
+                <b>AI Translation:</b><br><br>
+                {safe_translation}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        st.info("請按下 Translate with Gemini。")
+
+
+# =========================
+# 介面提示區
+# =========================
+
+if st.session_state.translation:
+    st.divider()
+    st.subheader("介面提示區")
+
+    tone_info = st.session_state.tone_info
+
+    if condition.startswith("A"):
+        st.info("A 版：此版本只顯示 AI 翻譯，不提供額外語氣提示。")
+
+    elif condition.startswith("B"):
+        st.markdown("### Tone Label")
+
+        if tone_info:
+            st.markdown(
+                f"""
+                - 原文語氣：**{tone_info['source_tone']}**
+                - 譯文語氣：**{tone_info['translation_tone']}**
+                - 可能風險：**{tone_info['risk']}**
+                """
+            )
+        else:
+            st.info("尚未產生語氣分析。")
+
+    elif condition.startswith("C"):
+        if tone_info:
+            st.warning(tone_info["warning"])
+        else:
+            st.warning("採納前請確認 AI 翻譯是否保留原文語氣與原意。")
+
+        st.markdown(
+            """
+            **採納前確認：**  
+            請先確認此翻譯是否保留原文語氣，再決定是否採納或修改。
+            """
+        )
+
+
+# =========================
+# 使用者決策與記錄區
+# =========================
+
+if st.session_state.translation:
+    st.divider()
+    st.subheader("使用者決策")
+
+    action = st.radio(
+        "如果你正在使用這個 AI 翻譯，你會怎麼處理？",
+        [
+            "直接採納",
+            "修改後採納",
+            "不採納",
+            "重新翻譯"
+        ]
+    )
+
+    edited_translation = ""
+
+    if action == "修改後採納":
+        edited_translation = st.text_area(
+            "請輸入你修改後的翻譯：",
+            value=st.session_state.translation,
+            height=100
+        )
+
+    perceived_shift = st.radio(
+        "你認為這個翻譯是否完整保留原文語氣？",
+        [
+            "完全保留",
+            "大致保留",
+            "有一點偏移",
+            "明顯偏移",
+            "不確定"
+        ]
+    )
+
+    comment = st.text_area(
+        "簡短說明你的選擇原因（選填）：",
+        height=80
+    )
+
+    if st.button("Submit Response"):
+        end_time = time.time()
+        time_spent = None
+
+        if st.session_state.start_time is not None:
+            time_spent = round(end_time - st.session_state.start_time, 2)
+
+        row = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "participant_id": participant_id,
+            "condition": condition,
+            "input_mode": input_mode,
+            "case_name": selected_case_name,
+            "source_text": source_text,
+            "ai_translation": st.session_state.translation,
+            "action": action,
+            "edited_translation": edited_translation,
+            "perceived_shift": perceived_shift,
+            "comment": comment,
+            "time_spent_sec": time_spent
+        }
+
+        save_log(row)
+
+        st.success("已記錄本次操作。")
+        st.write("資料已存到：", LOG_FILE)
+
+
+# =========================
+# 資料檢視區
+# =========================
+
+st.divider()
+
+with st.expander("查看目前收集到的操作資料"):
+    if os.path.exists(LOG_FILE):
+        log_df = pd.read_csv(LOG_FILE)
+        st.dataframe(log_df)
+    else:
+        st.write("目前還沒有資料。")
