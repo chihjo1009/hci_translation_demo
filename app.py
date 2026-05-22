@@ -1,11 +1,7 @@
-import os
 import json
 import re
 import html
-import time
-from datetime import datetime
 
-import pandas as pd
 import streamlit as st
 import google.generativeai as genai
 
@@ -20,10 +16,6 @@ st.set_page_config(
     layout="wide"
 )
 
-LOG_DIR = "logs"
-LOG_FILE = os.path.join(LOG_DIR, "translation_logs.csv")
-os.makedirs(LOG_DIR, exist_ok=True)
-
 
 # =========================
 # Gemini API 設定
@@ -33,7 +25,7 @@ def setup_gemini():
     api_key = st.secrets.get("GEMINI_API_KEY", None)
 
     if not api_key:
-        st.error("找不到 GEMINI_API_KEY。請確認 .streamlit/secrets.toml 是否設定正確。")
+        st.error("找不到 GEMINI_API_KEY。請確認 Streamlit Secrets 是否設定 GEMINI_API_KEY。")
         return None
 
     genai.configure(api_key=api_key)
@@ -78,6 +70,7 @@ CASES = {
     },
 }
 
+
 # =========================
 # Gemini 翻譯函式
 # =========================
@@ -107,6 +100,7 @@ def translate_with_gemini(source_text: str) -> str:
         response = model.generate_content(prompt)
         text = response.text.strip()
 
+        # 如果模型仍輸出多行，只取第一個非空行
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         if lines:
             return lines[0]
@@ -179,22 +173,6 @@ JSON 格式如下：
 
 
 # =========================
-# CSV 記錄函式
-# =========================
-
-def save_log(row: dict):
-    df = pd.DataFrame([row])
-
-    if os.path.exists(LOG_FILE):
-        old_df = pd.read_csv(LOG_FILE)
-        new_df = pd.concat([old_df, df], ignore_index=True)
-    else:
-        new_df = df
-
-    new_df.to_csv(LOG_FILE, index=False, encoding="utf-8-sig")
-
-
-# =========================
 # Session State 初始化
 # =========================
 
@@ -206,9 +184,6 @@ if "tone_info" not in st.session_state:
 
 if "current_source_key" not in st.session_state:
     st.session_state.current_source_key = ""
-
-if "start_time" not in st.session_state:
-    st.session_state.start_time = None
 
 
 # =========================
@@ -223,11 +198,6 @@ st.title("AI Translation Review Assistant")
 # =========================
 
 st.sidebar.header("介面設定")
-
-participant_id = st.sidebar.text_input(
-    "Participant ID",
-    value="P001"
-)
 
 condition = st.sidebar.radio(
     "選擇介面版本",
@@ -251,7 +221,6 @@ input_mode = st.sidebar.radio(
 # 決定輸入來源
 # =========================
 
-selected_case_name = ""
 case = None
 source_text = ""
 
@@ -273,7 +242,6 @@ else:
         placeholder="例如：Could you possibly send it by Friday?"
     )
 
-    selected_case_name = "自訂輸入"
     source_key = f"custom::{source_text}"
 
 
@@ -282,7 +250,6 @@ if st.session_state.current_source_key != source_key:
     st.session_state.translation = ""
     st.session_state.tone_info = None
     st.session_state.current_source_key = source_key
-    st.session_state.start_time = None
 
 
 # =========================
@@ -328,8 +295,6 @@ with right_col:
         if not source_text.strip():
             st.warning("請先輸入英文句子。")
         else:
-            st.session_state.start_time = time.time()
-
             with st.spinner("Gemini 翻譯中..."):
                 ai_translation = translate_with_gemini(source_text)
 
@@ -413,88 +378,3 @@ if st.session_state.translation:
             請先確認此翻譯是否保留原文語氣，再決定是否採納或修改。
             """
         )
-
-
-# =========================
-# 使用者決策與記錄區
-# =========================
-
-if st.session_state.translation:
-    st.divider()
-    st.subheader("使用者決策")
-
-    action = st.radio(
-        "如果你正在使用這個 AI 翻譯，你會怎麼處理？",
-        [
-            "直接採納",
-            "修改後採納",
-            "不採納",
-            "重新翻譯"
-        ]
-    )
-
-    edited_translation = ""
-
-    if action == "修改後採納":
-        edited_translation = st.text_area(
-            "請輸入你修改後的翻譯：",
-            value=st.session_state.translation,
-            height=100
-        )
-
-    perceived_shift = st.radio(
-        "你認為這個翻譯是否完整保留原文語氣？",
-        [
-            "完全保留",
-            "大致保留",
-            "有一點偏移",
-            "明顯偏移",
-            "不確定"
-        ]
-    )
-
-    comment = st.text_area(
-        "簡短說明你的選擇原因（選填）：",
-        height=80
-    )
-
-    if st.button("Submit Response"):
-        end_time = time.time()
-        time_spent = None
-
-        if st.session_state.start_time is not None:
-            time_spent = round(end_time - st.session_state.start_time, 2)
-
-        row = {
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "participant_id": participant_id,
-            "condition": condition,
-            "input_mode": input_mode,
-            "case_name": selected_case_name,
-            "source_text": source_text,
-            "ai_translation": st.session_state.translation,
-            "action": action,
-            "edited_translation": edited_translation,
-            "perceived_shift": perceived_shift,
-            "comment": comment,
-            "time_spent_sec": time_spent
-        }
-
-        save_log(row)
-
-        st.success("已記錄本次操作。")
-        st.write("資料已存到：", LOG_FILE)
-
-
-# =========================
-# 資料檢視區
-# =========================
-
-st.divider()
-
-with st.expander("查看目前收集到的操作資料"):
-    if os.path.exists(LOG_FILE):
-        log_df = pd.read_csv(LOG_FILE)
-        st.dataframe(log_df)
-    else:
-        st.write("目前還沒有資料。")
