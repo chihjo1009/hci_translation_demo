@@ -1,5 +1,3 @@
-streamlit run app.py
-'streamlit' 不是內部或外部命令、可執行的程式或批次檔。import json
 import re
 import html
 
