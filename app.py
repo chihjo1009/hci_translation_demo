@@ -1,4 +1,5 @@
-import json
+streamlit run app.py
+'streamlit' 不是內部或外部命令、可執行的程式或批次檔。import json
 import re
 import html
 
@@ -46,27 +47,6 @@ CASES = {
         "risk": "可能被翻成較強硬或命令式語氣",
         "warning": "原文是委婉請求，翻譯時可能變成較強硬的命令語氣。採納前請確認是否需要保留禮貌語氣。",
         "fixed_translation": "你必須在星期五前寄給我。"
-    },
-    "I’m not sure this plan is realistic.": {
-        "source": "I’m not sure this plan is realistic.",
-        "original_tone": "不確定、保留語氣",
-        "risk": "可能被翻成較肯定或直接的批評",
-        "warning": "原文包含不確定語氣，翻譯時可能被轉成較肯定的否定判斷。採納前請確認是否保留原文的保留語氣。",
-        "fixed_translation": "我認為這個計畫不太實際。"
-    },
-    "This may not be the best option.": {
-        "source": "This may not be the best option.",
-        "original_tone": "保留意見",
-        "risk": "可能被翻成明確否定",
-        "warning": "原文使用 may not，語氣較保留；翻譯時可能變成較明確的否定。採納前請確認是否保留原文的不確定性。",
-        "fixed_translation": "這不是最好的選擇。"
-    },
-    "I would appreciate it if you could review this.": {
-        "source": "I would appreciate it if you could review this.",
-        "original_tone": "禮貌請求",
-        "risk": "可能被翻成較直接、較不禮貌的請求",
-        "warning": "原文帶有禮貌請求語氣，翻譯時可能削弱禮貌程度。採納前請確認是否保留客氣表達。",
-        "fixed_translation": "請你檢查這個。"
     },
 }
 
