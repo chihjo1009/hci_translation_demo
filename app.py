@@ -216,8 +216,7 @@ else:
         st.session_state.current_source_key = source_key
 
 
-st.subheader("目前查看版本")
-st.info(condition)
+
 
 left_col, right_col = st.columns([1, 1])
 
